@@ -1,0 +1,476 @@
+{
+  "name": "31 Support-Automatisierung",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Test manuell starten",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        624
+      ],
+      "id": "66015f14-2ed6-41eb-b562-a66ec8c05ee4"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Für neue Tests request_id ändern. Gleiche IDs werden nicht erneut verarbeitet.\nreturn [{json: {\n  request_id: 'SUP-TEST-003',\n  customer_id: 'K001',\n  subject: 'Passwort vergessen',\n  message: 'Wie kann ich mein Passwort zurücksetzen?'\n}}];"
+      },
+      "name": "Testanfrage bereitstellen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        624
+      ],
+      "id": "de55b671-98ff-4d12-bea1-23fc52b358da"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "training-support",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "name": "Supportanfrage empfangen",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        224,
+        880
+      ],
+      "id": "d5144662-d557-4dbe-8c4b-bae20bec9034",
+      "webhookId": "0f481a28-46cb-47c9-a46c-591b92bf559a",
+      "notesInFlow": false,
+      "notes": "Optionaler HTTP-Eingang. Header-Auth-Credential konfigurieren. Ein JSON-Objekt je Aufruf. Antwort erst nach Abschluss; für kurze Übungsläufe. Kein E-Mail-Versand."
+    },
+    {
+      "parameters": {
+        "jsCode": "const current = $input.first().json;\nconst raw = $input.first().json;\nconst p = raw.body !== undefined ? raw.body : raw;\nconst errors = [];\nif (!p || typeof p !== 'object' || Array.isArray(p)) {\n  return [{json: {valid: false, errors: ['BODY_MUST_BE_OBJECT'],\n    status: 'rejected', decision: 'reject'}}];\n}\nconst read = key => typeof p[key] === 'string' ? p[key].trim() : '';\nconst request = {\n  request_id: read('request_id'),\n  submitted_customer_id: read('customer_id') || null,\n  subject: read('subject'), message: read('message')\n};\nif (!/^[A-Za-z0-9_-]{1,80}$/.test(request.request_id)) errors.push('REQUEST_ID_INVALID');\nif (!request.subject || request.subject.length > 200) errors.push('SUBJECT_INVALID');\nif (!request.message || request.message.length > 8000) errors.push('MESSAGE_INVALID');\nif ((request.submitted_customer_id || '').length > 80) errors.push('CUSTOMER_ID_INVALID');\nif ([request.subject, request.message, request.submitted_customer_id || ''].some(s => s.includes('\\u0000'))) errors.push('NUL_CHARACTER');\n// Nur benötigte Nutzdaten speichern, niemals Webhook-Header oder Auth-Geheimnisse.\nrequest.input_payload = {\n  request_id: request.request_id, customer_id: request.submitted_customer_id,\n  subject: request.subject, message: request.message\n};\nreturn [{json: {valid: errors.length === 0, errors, request}}];"
+      },
+      "name": "Anfrage normalisieren",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        624
+      ],
+      "id": "1016b250-21e7-4303-93cc-a1384b161c0a"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a40e4774-e2a2-46f3-824a-b74b5d632871",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Eingabe gültig?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        672,
+        624
+      ],
+      "id": "311f4ca9-d227-4077-8997-b64a602a5195"
+    },
+    {
+      "parameters": {
+        "jsCode": "const current = $input.first().json;\nreturn [{json: {request_id: current.request?.request_id || null,\n  status: 'rejected', decision: 'reject', reason_codes: current.errors,\n  persisted: false}}];"
+      },
+      "name": "Ungültigen Eingang zurückgeben",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        880
+      ],
+      "id": "97e9f27c-acc5-4294-b923-0b4b46387e56"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH data AS (SELECT ($1::jsonb)->'request' AS r), inserted AS (\n  INSERT INTO support_requests (\n    request_id, submitted_customer_id, subject, message, input_payload, status\n  )\n  SELECT r->>'request_id', r->>'submitted_customer_id', r->>'subject',\n    r->>'message', r->'input_payload', 'processing'\n  FROM data\n  ON CONFLICT (request_id) DO NOTHING\n  RETURNING request_id\n)\nSELECT EXISTS (SELECT 1 FROM inserted) AS inserted,\n       (SELECT r FROM data) AS request;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify($json) }}"
+        }
+      },
+      "name": "Anfrage eindeutig anlegen",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        880,
+        624
+      ],
+      "id": "eba9cc0e-4268-43d0-9f31-a11ba094eb25",
+      "notesInFlow": false,
+      "notes": "Postgres-Credential für n8n_training auswählen. Ein JSON-Objekt wird als gebundener Parameter $1 übergeben."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "02ed9da8-9c70-4e2c-860f-49d704d6afed",
+              "leftValue": "={{ $json.inserted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Neue Anfrage?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1104,
+        624
+      ],
+      "id": "a8eb83fb-4071-471f-a5cc-21fe12eea866"
+    },
+    {
+      "parameters": {
+        "jsCode": "const current = $input.first().json;\nreturn [{json: {request_id: current.request.request_id, status: 'duplicate',\n  decision: null, processed: false,\n  message: 'Anfrage-ID bereits vorhanden. Keine erneute KI-Verarbeitung.'}}];"
+      },
+      "name": "Duplikat zurückgeben",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        880
+      ],
+      "id": "607dc7d1-7cb4-464e-8982-98b92c7b210a"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "32 Supportanfrage analysieren"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "context": "={{ { request: $json.request } }}"
+          },
+          "matchingColumns": [
+            "context"
+          ],
+          "schema": [
+            {
+              "id": "context",
+              "displayName": "context",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "name": "Supportanfrage analysieren aufrufen",
+      "id": "efd4f256-90f5-419a-a91c-8cd8bbd8f80f",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1328,
+        624
+      ],
+      "notesInFlow": true,
+      "notes": "Nach dem Import 32 Supportanfrage analysieren aus der Workflow-Liste auswählen. context ist bereits zugeordnet. Auf Abschluss warten."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cff09eea-658c-4516-8aeb-b0816aef2014",
+              "leftValue": "={{ $json.prepare_answer === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Antwort vorbereiten?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1552,
+        624
+      ],
+      "id": "9b07b1ec-1bc0-4994-89ca-4d4c243b5f10"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "33 Supportantwort vorbereiten"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "context": "={{ $json }}"
+          },
+          "matchingColumns": [
+            "context"
+          ],
+          "schema": [
+            {
+              "id": "context",
+              "displayName": "context",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "name": "Supportantwort vorbereiten aufrufen",
+      "id": "40d90d15-0737-4956-a192-89caf7ccf4b9",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1760,
+        624
+      ],
+      "notesInFlow": true,
+      "notes": "Nach dem Import 33 Supportantwort vorbereiten aus der Workflow-Liste auswählen. context ist bereits zugeordnet. Auf Abschluss warten."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH data AS (SELECT $1::jsonb AS d)\nUPDATE support_requests r SET\n  customer_id = data.d->'customer'->>'customer_id',\n  analysis = COALESCE(data.d->'analysis', '{}'::jsonb),\n  source_article_ids = COALESCE(data.d->'source_article_ids', '[]'::jsonb),\n  draft = data.d->>'draft', decision = data.d->>'decision',\n  status = data.d->>'status',\n  reason_codes = COALESCE(data.d->'reason_codes', '[]'::jsonb),\n  error_code = data.d->>'error_code', error_message = data.d->>'error_message',\n  updated_at = CURRENT_TIMESTAMP\nFROM data\nWHERE r.request_id = data.d->'request'->>'request_id'\nRETURNING r.request_id, r.customer_id, r.status, r.decision,\n  r.reason_codes, r.analysis, r.source_article_ids, r.draft;",
+        "options": {
+          "queryReplacement": "={{ JSON.stringify($json) }}"
+        }
+      },
+      "name": "Supportergebnis speichern",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1984,
+        624
+      ],
+      "id": "19dbaf0d-7c36-4144-9f57-89bfd714550d",
+      "notesInFlow": false,
+      "notes": "Postgres-Credential für n8n_training auswählen. Ein JSON-Objekt wird als gebundener Parameter $1 übergeben."
+    },
+    {
+      "parameters": {
+        "content": "## 31 Support-Automatisierung\n\nEingang normalisieren → neue Anfrage atomar registrieren → 32 analysieren lassen\n→ bei geeigneter Wissensgrundlage 33 aufrufen → Ergebnis speichern.\n\n### Einmalig nach Import\n- Beide Execute-Sub-workflow-Nodes mit 32 bzw. 33 verknüpfen.\n- Trainings-Postgres in „Anfrage eindeutig anlegen“ und „Supportergebnis speichern“ wählen.\n- 32 und 33 konfigurieren und speichern, bevor dieser Workflow ausgeführt wird.\n\nTest: Manual Trigger; request_id SUP-TEST-003. Zweiter identischer Lauf: duplicate.\nOptionaler Webhook: eigenes Header-Auth-Credential, POST training-support.\nEin Request pro Execution. Keine E-Mail und keine Freigabeoberfläche.\nFehlerstatus von 32/33 werden hier gespeichert. DB-/Aufruffehler stoppen den Lauf;\nprocessing-Fälle danach prüfen. Kein automatischer Wiederanlauf.\n\nDie drei JSON-Dateien sind ein zusammengehöriger Versionsstand.\n",
+        "height": 500,
+        "width": 850,
+        "color": 5
+      },
+      "name": "Hauptworkflow dokumentieren",
+      "id": "27189a83-19a2-485f-b7fa-31efcf54ff5b",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Test manuell starten": {
+      "main": [
+        [
+          {
+            "node": "Testanfrage bereitstellen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Testanfrage bereitstellen": {
+      "main": [
+        [
+          {
+            "node": "Anfrage normalisieren",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supportanfrage empfangen": {
+      "main": [
+        [
+          {
+            "node": "Anfrage normalisieren",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anfrage normalisieren": {
+      "main": [
+        [
+          {
+            "node": "Eingabe gültig?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eingabe gültig?": {
+      "main": [
+        [
+          {
+            "node": "Anfrage eindeutig anlegen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ungültigen Eingang zurückgeben",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anfrage eindeutig anlegen": {
+      "main": [
+        [
+          {
+            "node": "Neue Anfrage?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Neue Anfrage?": {
+      "main": [
+        [
+          {
+            "node": "Supportanfrage analysieren aufrufen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Duplikat zurückgeben",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supportanfrage analysieren aufrufen": {
+      "main": [
+        [
+          {
+            "node": "Antwort vorbereiten?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Antwort vorbereiten?": {
+      "main": [
+        [
+          {
+            "node": "Supportantwort vorbereiten aufrufen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supportergebnis speichern",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supportantwort vorbereiten aufrufen": {
+      "main": [
+        [
+          {
+            "node": "Supportergebnis speichern",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "active": false,
+  "pinData": {},
+  "tags": []
+}
